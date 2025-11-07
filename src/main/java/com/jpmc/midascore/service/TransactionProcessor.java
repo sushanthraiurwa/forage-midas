@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Optional;
+
 @Service
 public class TransactionProcessor {
 
@@ -17,40 +19,49 @@ public class TransactionProcessor {
 
     private final UserRepository userRepository;
     private final TransactionRepository transactionRepository;
+    private final IncentiveService incentiveService;
 
-    public TransactionProcessor(UserRepository userRepository, TransactionRepository transactionRepository) {
+    public TransactionProcessor(UserRepository userRepository,
+                                TransactionRepository transactionRepository,
+                                IncentiveService incentiveService) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
+        this.incentiveService = incentiveService;
     }
 
     @Transactional
     public void process(Transaction transaction) {
-        UserRecord sender = userRepository.findById(transaction.getSenderId()).orElse(null);
-        UserRecord recipient = userRepository.findById(transaction.getRecipientId()).orElse(null);
+        Optional<UserRecord> senderOpt = userRepository.findById(transaction.getSenderId());
+        Optional<UserRecord> recipientOpt = userRepository.findById(transaction.getRecipientId());
 
-        if (sender == null || recipient == null) {
-            logger.warn("❌ Invalid Transaction - Sender or Recipient not found: {}", transaction);
+        if (senderOpt.isEmpty() || recipientOpt.isEmpty()) {
+            logger.warn("⚠️ Invalid sender or recipient ID — skipping transaction: {}", transaction);
             return;
         }
 
+        UserRecord sender = senderOpt.get();
+        UserRecord recipient = recipientOpt.get();
         float amount = transaction.getAmount();
-        if (sender.getBalance() < amount) {
+
+        if (sender.getBalance() >= amount) {
+            // ✅ Get incentive from REST API
+            float incentive = incentiveService.fetchIncentive(transaction);
+
+            // ✅ Update balances
+            sender.setBalance(sender.getBalance() - amount);
+            recipient.setBalance(recipient.getBalance() + amount + incentive);
+
+            userRepository.save(sender);
+            userRepository.save(recipient);
+
+            // ✅ Save record with incentive included
+            TransactionRecord record = new TransactionRecord(sender, recipient, amount, incentive);
+            transactionRepository.save(record);
+
+            logger.info("✅ Transaction Recorded: {} -> {} | Amount: {} | Incentive: {}",
+                    sender.getName(), recipient.getName(), amount, incentive);
+        } else {
             logger.warn("💸 Skipped Transaction - Insufficient Balance for Sender [{}]", sender.getName());
-            return;
         }
-
-        // ✅ Adjust balances
-        sender.setBalance(sender.getBalance() - amount);
-        recipient.setBalance(recipient.getBalance() + amount);
-
-        // ✅ Save updates
-        userRepository.save(sender);
-        userRepository.save(recipient);
-
-        // ✅ Record transaction
-        TransactionRecord record = new TransactionRecord(sender, recipient, amount);
-        transactionRepository.save(record);
-
-        logger.info("✅ Transaction Recorded: {} -> {} | Amount: {}", sender.getName(), recipient.getName(), amount);
     }
 }
